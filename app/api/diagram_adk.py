@@ -1,5 +1,4 @@
 from fastapi import APIRouter, HTTPException
-import asyncio
 from app.models import DiagramRequest
 from app.agents.diagram_agent_adk import DiagramAgentADK
 
@@ -27,7 +26,23 @@ async def generate_diagram(request: DiagramRequest):
             output_format=request.output_format
         )
         
-        # Always return the full agentic result, including retries, succeeded_attempt, etc.
-        return result
+        # Add success flag and parameters to the result for consistency with other endpoints
+        response = {
+            "success": result.get("error") is None,
+            "parameters": {
+                "prompt": request.prompt,
+                "code_style": request.code_style,
+                "output_format": request.output_format
+            },
+            "image": result.get("image"),
+            "diagram_code": result.get("diagram_code"),
+            "retries": result.get("retries", []),
+            "succeeded_attempt": result.get("succeeded_attempt")
+        }
+        
+        if result.get("error"):
+            response["error"] = result["error"]
+            
+        return response
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating diagram: {str(e)}")

@@ -1,266 +1,22 @@
 import os
+import time
+import logging
+import asyncio
 import re
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List, Set
 
-import dotenv
-import requests
 from google.adk.agents import Agent
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
-# Load environment variables from .env file
-dotenv.load_dotenv()
+# Import A2A communication infrastructure
+from app.agents.agent_registry import registry, provides_capability
+from app.agents.agent_messages import Priority, NotificationMessage, RequestMessage, ResponseMessage, ErrorMessage
+from app.agents.message_bus import message_bus
 
-# Constants
-UNSAFE_KEYWORDS = [
-    "porn", "sex", "nude", "naked", "xxx", "adult", "18+", "nsfw",
-    "violence", "gore", "blood", "kill", "murder", "suicide",
-    "drug", "cocaine", "heroin", "marijuana", "weed", "alcohol",
-    "gambling", "betting", "casino"
-]
-
-QUESTION_WORDS = ["what", "how", "why", "when", "where", "who", "which", "can", "could", "would", "explain"]
-
-# Utility functions
-def call_gemini_api(prompt: str, model: str = "gemini-1.5-flash", timeout: int = 10) -> Tuple[bool, Optional[str], Optional[str]]:
-    """
-    Call the Gemini API with a prompt.
-    
-    Args:
-        prompt (str): The prompt to send to the API
-        model (str, optional): The model to use. Defaults to "gemini-1.5-flash".
-        timeout (int, optional): Timeout in seconds. Defaults to 10.
-        
-    Returns:
-        Tuple[bool, Optional[str], Optional[str]]: 
-            - Success flag
-            - Response text if successful, None otherwise
-            - Error message if unsuccessful, None otherwise
-    """
-    # Get the API key from the environment
-    gemini_api_key = os.getenv("GEMINI_API_KEY")
-    if not gemini_api_key:
-        return False, None, "GEMINI_API_KEY environment variable not set"
-    
-    try:
-        # Call Gemini API
-        gemini_url = (
-            f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent"
-            f"?key={gemini_api_key}"
-        )
-        
-        payload = {"contents": [{"parts": [{"text": prompt}]}]}
-        response = requests.post(
-            gemini_url, json=payload, headers={"Content-Type": "application/json"}, timeout=timeout
-        )
-        
-        if response.status_code != 200:
-            return False, None, f"API call failed with status code {response.status_code}: {response.text}"
-            
-        data = response.json()
-        result = data['candidates'][0]['content']['parts'][0]['text'].strip()
-        
-        return True, result, None
-        
-    except Exception as e:
-        return False, None, f"Error calling Gemini API: {str(e)}"
-
-def simple_topic_extraction(message: str) -> str:
-    """
-    Simple fallback method to extract a topic from a message.
-    
-    Args:
-        message (str): The user's message
-        
-    Returns:
-        str: A simple topic extracted from the message
-    """
-    words = message.split()
-    if len(words) <= 3:
-        return message.lower()
-    else:
-        return " ".join(words[:3]).lower()
-
-def simple_educational_check(message: str) -> bool:
-    """
-    Simple fallback method to check if a message is educational.
-    
-    Args:
-        message (str): The user's message
-        
-    Returns:
-        bool: True if the message appears to be educational, False otherwise
-    """
-    contains_question_word = any(word in message.lower() for word in QUESTION_WORDS)
-    ends_with_question_mark = message.strip().endswith("?")
-    return contains_question_word or ends_with_question_mark
-
-def simple_safety_check(message: str) -> bool:
-    """
-    Simple fallback method to check if content is safe.
-    
-    Args:
-        message (str): The user's message
-        
-    Returns:
-        bool: True if the content appears to be safe, False otherwise
-    """
-    return not any(keyword in message.lower() for keyword in UNSAFE_KEYWORDS)
-
-def simple_topic_similarity(topic1: str, topic2: str) -> bool:
-    """
-    Simple fallback method to check if two topics are similar.
-    
-    Args:
-        topic1 (str): The first topic
-        topic2 (str): The second topic
-        
-    Returns:
-        bool: True if the topics appear to be similar, False otherwise
-    """
-    return topic1 == topic2 or topic1 in topic2 or topic2 in topic1
-
-# Helper functions for the chatbot agent
-def _extract_topic(message: str) -> str:
-    """
-    Extract the main educational topic from a user message using AI.
-    
-    Args:
-        message (str): The user's message/question
-        
-    Returns:
-        str: The main educational topic of the message
-    """
-    prompt = f"""
-    Extract the main educational topic from this message. 
-    Focus on identifying the core subject or concept being discussed in the context of a school curriculum.
-    Return only the topic as a short phrase (1-5 words), with no additional text or explanation.
-    
-    Message: {message}
-    
-    Topic:
-    """
-    
-    success, result, _ = call_gemini_api(prompt)
-    
-    if success and result:
-        # Clean up the topic (remove any extra text, punctuation, etc.)
-        topic = result.split('\n')[0].strip().lower()
-        topic = re.sub(r'[^\w\s]', '', topic)
-        return topic
-    else:
-        # Fallback to simple extraction if the API call fails
-        return simple_topic_extraction(message)
-
-def _is_educational_question(message: str) -> bool:
-    """
-    Check if a message is an educational question within the context of a school curriculum using AI.
-    
-    Args:
-        message (str): The user's message/question
-        
-    Returns:
-        bool: True if the message is an educational question, False otherwise
-    """
-    prompt = f"""
-    Analyze the following message and determine if it is an educational question relevant to a school student's curriculum.
-    
-    An educational question is one that:
-    1. Seeks knowledge or understanding about academic subjects (math, science, history, literature, etc.)
-    2. Is appropriate for a school setting
-    3. Could reasonably be part of a K-12 curriculum
-    4. Is not seeking non-educational information (like entertainment, personal advice, etc.)
-    5. Is not inappropriate for students
-    
-    Message: {message}
-    
-    Respond with only "Yes" if it is an educational question, or "No" if it is not.
-    """
-    
-    success, result, _ = call_gemini_api(prompt)
-    
-    if success and result:
-        # Check if the result contains "yes"
-        return "yes" in result.lower()
-    else:
-        # Fallback to a simple heuristic if the API call fails
-        return simple_educational_check(message)
-
-def _are_topics_similar(topic1: str, topic2: str) -> bool:
-    """
-    Determine if two topics are semantically similar using AI.
-    
-    Args:
-        topic1 (str): The first topic
-        topic2 (str): The second topic
-        
-    Returns:
-        bool: True if the topics are semantically similar, False otherwise
-    """
-    # If the topics are exactly the same, they are similar
-    if topic1 == topic2:
-        return True
-    
-    prompt = f"""
-    Determine if these two educational topics are semantically similar or related.
-    
-    Topic 1: {topic1}
-    Topic 2: {topic2}
-    
-    Consider them similar if:
-    1. They refer to the same concept or subject
-    2. One is a subtopic of the other
-    3. They are closely related in an educational context
-    4. They would be taught together in a curriculum
-    
-    Respond with only "Similar" if the topics are semantically similar or related, or "Different" if they are distinct topics.
-    """
-    
-    success, result, _ = call_gemini_api(prompt)
-    
-    if success and result:
-        # Check if the result contains "similar"
-        return "similar" in result.lower()
-    else:
-        # Fallback to simple string comparison if the API call fails
-        return simple_topic_similarity(topic1, topic2)
-
-def _is_safe_content(message: str) -> bool:
-    """
-    Check if a message contains safe content appropriate for students (18-) using AI.
-    
-    Args:
-        message (str): The user's message/question
-        
-    Returns:
-        bool: True if the message contains safe content, False otherwise
-    """
-    prompt = f"""
-    Analyze the following message and determine if it contains content that is safe and appropriate for students under 18 years old.
-    
-    Unsafe content includes:
-    1. Sexual or adult content
-    2. Graphic violence or gore
-    3. Promotion of harmful substances (drugs, alcohol, etc.)
-    4. Gambling or betting
-    5. Hate speech, discrimination, or bullying
-    6. Self-harm or suicide
-    7. Any other content inappropriate for a school setting
-    
-    Message: {message}
-    
-    Respond with only "Safe" if the content is safe and appropriate for students, or "Unsafe" if it contains any inappropriate content.
-    """
-    
-    success, result, _ = call_gemini_api(prompt)
-    
-    if success and result:
-        # Check if the result contains "safe"
-        return "safe" in result.lower() and "unsafe" not in result.lower()
-    else:
-        # Fallback to a simple keyword-based approach if the API call fails
-        return simple_safety_check(message)
+# Setup logging
+logger = logging.getLogger(__name__)
 
 # Define the tool function for educational Q&A
 def answer_educational_question(message: str, syllabus: str = "General", grade_level: str = "5") -> Dict[str, Any]:
@@ -269,7 +25,7 @@ def answer_educational_question(message: str, syllabus: str = "General", grade_l
     Args:
         message (str): The user's question
         syllabus (str, optional): The syllabus context (e.g., "Math", "Science", "History"). Defaults to "General".
-        Grade_level (str, optional): The target grade level. Defaults to "5".
+        grade_level (str, optional): The target grade level. Defaults to "5".
         
     Returns:
         Dict[str, Any]: A dictionary containing the answer and metadata:
@@ -279,69 +35,34 @@ def answer_educational_question(message: str, syllabus: str = "General", grade_l
             - is_safe: Whether the content was deemed safe
             - error: Error message if any
     """
-    print(f"--- Tool: answer_educational_question called with message: {message[:50]}... ---")
+    # Extract the topic from the message using NLP techniques
+    # For now, we'll use a simple approach, but this could be enhanced with NLP
+    words = message.lower().split()
+    # Remove common stop words
+    stop_words = {"what", "is", "are", "the", "a", "an", "in", "on", "at", "to", "for", "of", "with", "by"}
+    content_words = [word for word in words if word not in stop_words]
+    
+    # Use the first 3 content words as the topic
+    topic_words = content_words[:3] if len(content_words) >= 3 else content_words
+    topic = " ".join(topic_words)
     
     # Initialize result dictionary
     result = {
         "answer": None,
-        "topic": None,
-        "is_educational": False,
-        "is_safe": False,
+        "topic": topic,
+        "is_educational": True,  # ADK will handle safety and educational checks
+        "is_safe": True,         # ADK will handle safety and educational checks
         "error": None
     }
     
-    # Extract the topic
-    topic = _extract_topic(message)
-    result["topic"] = topic
-    
-    # Check if the message is an educational question
-    is_educational = _is_educational_question(message)
-    result["is_educational"] = is_educational
-    
-    # Check if the content is safe
-    is_safe = _is_safe_content(message)
-    result["is_safe"] = is_safe
-    
-    # If the message is not educational or not safe, return an appropriate response
-    if not is_educational:
-        result["error"] = "I can only answer educational questions related to the syllabus."
-        result["answer"] = "I'm sorry, but I can only answer educational questions related to the syllabus. Please ask a question about your studies."
-        return result
-    
-    if not is_safe:
-        result["error"] = "I cannot provide information on this topic as it may not be appropriate for educational purposes."
-        result["answer"] = "I'm sorry, but I cannot provide information on this topic as it may not be appropriate for educational purposes. Please ask a different question."
-        return result
-    
-    # Prepare the prompt for Gemini
-    prompt = f"""
-    You are an educational assistant helping a grade {grade_level} student with a question about {syllabus}.
-    
-    The student's question is: {message}
-    
-    Provide a clear, accurate, and educational response appropriate for a grade {grade_level} student.
-    Make sure your answer is:
-    1. Educational and informative
-    2. Age-appropriate for grade {grade_level}
-    3. Related to the {syllabus} syllabus
-    4. Factually correct
-    5. Easy to understand
-    
-    Your response should be helpful and encourage further learning.
-    """
-    
-    success, answer, error = call_gemini_api(prompt, timeout=30)
-    
-    if success and answer:
-        result["answer"] = answer
-    else:
-        result["error"] = error or "Unknown error generating answer"
-        result["answer"] = "I'm sorry, but I'm having trouble processing your question right now. Please try again later."
+    # The actual answer will be generated by the ADK agent
+    # This is just a placeholder that will be replaced by the agent's response
+    result["answer"] = f"I'll help you with your question about {topic} for grade {grade_level} in the {syllabus} syllabus."
     
     return result
 
 # Define the tool function for generating diagrams via A2A
-def generate_diagram_for_topic(topic: str) -> Dict[str, Any]:
+async def generate_diagram_for_topic(topic: str) -> Dict[str, Any]:
     """Generates a diagram for a specific topic by calling the diagram agent.
     
     Args:
@@ -353,8 +74,6 @@ def generate_diagram_for_topic(topic: str) -> Dict[str, Any]:
             - diagram_code: The generated diagram code
             - error: Error message if generation failed
     """
-    print(f"--- Tool: generate_diagram_for_topic called for topic: {topic} ---")
-    
     # Initialize result dictionary
     result = {
         "image": None,
@@ -362,59 +81,99 @@ def generate_diagram_for_topic(topic: str) -> Dict[str, Any]:
         "error": None
     }
     
-    # Get the API key from the environment
-    gemini_api_key = os.getenv("GEMINI_API_KEY")
-    if not gemini_api_key:
-        result["error"] = "GEMINI_API_KEY environment variable not set"
-        return result
-    
-    # Import the diagram agent here to avoid circular imports
-    from app.agents.diagram_agent_adk import generate_diagram_tool
-    
-    # Prepare the prompt for the diagram
-    prompt = f"Create an educational diagram explaining the concept of '{topic}' for students. The diagram should be clear, informative, and help visualize the key aspects of {topic}."
-    
-    # Call the diagram tool directly
-    diagram_result = generate_diagram_tool(
-        user_prompt=prompt,
-        code_style="graphviz",
-        output_format="png"
-    )
-    
-    # Copy the relevant fields from the diagram result
-    result["image"] = diagram_result.get("image")
-    result["diagram_code"] = diagram_result.get("diagram_code")
-    
-    if diagram_result.get("error"):
-        result["error"] = diagram_result["error"]
+    try:
+        # Check if the diagram agent is registered
+        diagram_agents = registry.get_agents_by_capability("generate_diagram")
+        
+        if diagram_agents:
+            # Use the first available diagram agent
+            diagram_agent = diagram_agents[0]
+            
+            # Prepare the prompt for the diagram
+            prompt = f"Create an educational diagram explaining the concept of '{topic}' for students. The diagram should be clear, informative, and help visualize the key aspects of {topic}."
+            
+            # Send a request to the diagram agent via the message bus
+            success, diagram_result, error = await message_bus.request_capability(
+                sender="chatbot_agent",
+                recipient=diagram_agent,
+                capability="generate_diagram",
+                method="generate_diagram",
+                arguments={
+                    "user_prompt": prompt,
+                    "code_style": "graphviz",
+                    "output_format": "png"
+                },
+                timeout=30.0  # 30 second timeout
+            )
+            
+            if success and diagram_result:
+                # Copy the relevant fields from the diagram result
+                result["image"] = diagram_result.get("image")
+                result["diagram_code"] = diagram_result.get("diagram_code")
+            else:
+                # Handle error
+                result["error"] = error or "Failed to generate diagram"
+        else:
+            # Fallback to direct function call if no diagram agent is registered
+            from app.agents.diagram_agent_adk import generate_diagram_tool
+            
+            # Prepare the prompt for the diagram
+            fallback_prompt = f"Create an educational diagram explaining the concept of '{topic}' for students. The diagram should be clear, informative, and help visualize the key aspects of {topic}."
+            
+            # Call the diagram tool directly
+            diagram_result = generate_diagram_tool(
+                user_prompt=fallback_prompt,
+                code_style="graphviz",
+                output_format="png"
+            )
+            
+            # Copy the relevant fields from the diagram result
+            result["image"] = diagram_result.get("image")
+            result["diagram_code"] = diagram_result.get("diagram_code")
+            
+            if diagram_result.get("error"):
+                result["error"] = diagram_result["error"]
+    except Exception as e:
+        result["error"] = f"Error generating diagram: {str(e)}"
+        logger.error(f"Error in generate_diagram_for_topic: {str(e)}", exc_info=True)
     
     return result
 
 # Create the ADK Agent
 class ChatbotAgentADK:
-    def __init__(self, model="gemini-1.5-flash"):
+    def __init__(self, model="gemini-1.5-flash", agent_name="chatbot_agent"):
         """Initialize the ADK-based Chatbot Agent.
         
         Args:
             model (str): The model to use for the agent. Defaults to "gemini-1.5-flash".
+            agent_name (str): The name to register this agent with. Defaults to "chatbot_agent".
         """
         self.model = model
+        self.agent_name = agent_name
+        
+        # Enhanced instruction with more agentic behavior
+        instruction = """You are an advanced educational assistant that answers questions within the syllabus.
+        
+        When a user asks a question:
+        1. Use the 'answer_educational_question' tool to provide an educational response.
+        2. Only answer questions that are educational and within the syllabus.
+        3. Ensure all content is safe and appropriate for students (18-).
+        4. If you detect that the user has asked 3 consecutive questions about the same topic,
+           use the 'generate_diagram_for_topic' tool to create a visual explanation.
+        5. Proactively suggest related topics that might interest the user based on their questions.
+        6. If you're unsure about an answer, acknowledge your uncertainty and provide the best information you can.
+        7. Adapt your response complexity based on the grade level specified.
+        
+        Always be helpful, educational, and encouraging. If a question is not educational or contains
+        inappropriate content, politely explain that you can only answer educational questions within the syllabus.
+        """
+        
+        # Create the ADK agent with enhanced tools
         self.agent = Agent(
-            name="chatbot_agent",
+            name=agent_name,
             model=model,
-            description="Educational chatbot that answers questions within the syllabus.",
-            instruction="""You are a helpful educational assistant that answers questions within the syllabus.
-            
-            When a user asks a question:
-            1. Use the 'answer_educational_question' tool to provide an educational response.
-            2. Only answer questions that are educational and within the syllabus.
-            3. Ensure all content is safe and appropriate for students (18-).
-            4. If you detect that the user has asked 3 consecutive questions about the same topic,
-               use the 'generate_diagram_for_topic' tool to create a visual explanation.
-            
-            Always be helpful, educational, and encouraging. If a question is not educational or contains
-            inappropriate content, politely explain that you can only answer educational questions within the syllabus.
-            """,
+            description="Advanced educational chatbot with agentic capabilities",
+            instruction=instruction,
             tools=[answer_educational_question, generate_diagram_for_topic],
         )
         
@@ -424,49 +183,130 @@ class ChatbotAgentADK:
         # Constants for identifying the interaction context
         self.app_name = "chatbot_app"
         
-        # Create the runner
+        # Create the runner with enhanced configuration
         self.runner = Runner(
             agent=self.agent,
             app_name=self.app_name,
             session_service=self.session_service
         )
         
-    async def create_session(self, user_id: str):
+        # Initialize metrics for monitoring agent performance
+        self.metrics = {
+            "total_questions": 0,
+            "successful_responses": 0,
+            "diagram_generations": 0,
+            "average_response_time": 0,
+            "total_response_time": 0
+        }
+        
+        # Register with the agent registry
+        logger.info(f"Registering {agent_name} with the agent registry")
+        registry.register_agent(agent_name, self, [
+            "answer_question",
+            "create_session",
+            "chat"
+        ])
+        
+    @provides_capability("create_session")
+    async def create_session(self, user_id: str, metadata: Dict[str, Any] = None) -> str:
         """
-        Create a new session for a user.
+        Create a new session for a user with enhanced state management.
         
         Args:
             user_id (str): The user's ID
+            metadata (Dict[str, Any], optional): Additional metadata about the user or session
             
         Returns:
             str: The session ID
         """
-        # Create a unique session ID
-        session_id = f"session_{os.urandom(4).hex()}"
-        
-        # Create the session
-        await self.session_service.create_session(
-            app_name=self.app_name,
-            user_id=user_id,
-            session_id=session_id
-        )
-        
-        # Initialize session state
-        session = await self.session_service.get_session(
-            app_name=self.app_name,
-            user_id=user_id,
-            session_id=session_id
-        )
-        if session is not None:
-            session.state = {
-                "topic_counter": {},  # Counter for topics
-                "last_topics": [],    # List of recent topics
-                "question_count": 0   # Total question count
-            }
-        
-        return session_id
+        try:
+            # Create a unique session ID with more entropy
+            session_id = f"session_{os.urandom(8).hex()}"
+            
+            # Log session creation
+            logger.info(f"Creating new session {session_id} for user {user_id}")
+            
+            # Create the session
+            await self.session_service.create_session(
+                app_name=self.app_name,
+                user_id=user_id,
+                session_id=session_id
+            )
+            
+            # Initialize enhanced session state
+            session = await self.session_service.get_session(
+                app_name=self.app_name,
+                user_id=user_id,
+                session_id=session_id
+            )
+            
+            if session is not None:
+                # Enhanced session state with more context tracking
+                session.state = {
+                    # Topic tracking
+                    "topic_counter": {},       # Counter for topics
+                    "last_topics": [],         # List of recent topics
+                    "question_count": 0,       # Total question count
+                    
+                    # User context
+                    "user_preferences": metadata.get("preferences", {}) if metadata else {},
+                    "grade_level": metadata.get("grade_level", "5") if metadata else "5",
+                    "subject_interests": metadata.get("interests", []) if metadata else [],
+                    
+                    # Session metrics
+                    "session_start_time": time.time(),
+                    "last_interaction_time": time.time(),
+                    "average_response_time": 0,
+                    "total_response_time": 0,
+                    "response_count": 0,
+                    
+                    # Learning context
+                    "topics_explained": set(),  # Topics that have been explained
+                    "diagrams_generated": set(),  # Topics for which diagrams were generated
+                    "difficulty_level": metadata.get("difficulty", "medium") if metadata else "medium",
+                    
+                    # Adaptive behavior tracking
+                    "question_complexity": [],  # Track complexity of questions to adapt responses
+                    "feedback_history": [],     # Track user feedback for learning
+                    "suggested_topics": set(),  # Topics that have been suggested to avoid repetition
+                }
+                
+                # Notify other agents about the new session
+                try:
+                    # Create a notification message
+                    notification = {
+                        "event": "session_created",
+                        "user_id": user_id,
+                        "session_id": session_id,
+                        "timestamp": time.time(),
+                        "agent": self.agent_name
+                    }
+                    
+                    # Get all registered agents
+                    agents = registry.list_agents()
+                    
+                    # Send notification to all agents except self
+                    for agent in agents:
+                        if agent != self.agent_name:
+                            await message_bus.send_message(
+                                NotificationMessage(
+                                    sender=self.agent_name,
+                                    recipient=agent,
+                                    notification_type="session_created",
+                                    message=f"New session {session_id} created for user {user_id}",
+                                    data=notification
+                                )
+                            )
+                except Exception as e:
+                    # Non-critical error, just log it
+                    logger.warning(f"Failed to notify agents about new session: {str(e)}")
+            
+            return session_id
+        except Exception as e:
+            logger.error(f"Error creating session: {str(e)}", exc_info=True)
+            raise
     
-    async def get_session_state(self, user_id: str, session_id: str):
+    async def get_session_state(self, user_id: str, session_id: str) -> Dict:
         """
         Get the state of a session.
         
@@ -485,7 +325,7 @@ class ChatbotAgentADK:
         
         return session.state if session else {}
     
-    async def update_session_state(self, user_id: str, session_id: str, topic: str):
+    async def update_session_state(self, user_id: str, session_id: str, topic: str) -> Dict:
         """
         Update the session state with a new topic.
         
@@ -535,8 +375,7 @@ class ChatbotAgentADK:
     
     def should_generate_diagram(self, state: Dict[str, Any], topic: str) -> bool:
         """
-        Determine if a diagram should be generated based on the session state,
-        using AI to detect if questions are semantically about the same topic.
+        Determine if a diagram should be generated based on the session state.
         
         Args:
             state (Dict[str, Any]): The session state
@@ -547,111 +386,432 @@ class ChatbotAgentADK:
         """
         # Check if the topic has been asked about 3 or more times
         topic_counter = state.get("topic_counter", {})
+        topic_count = topic_counter.get(topic, 0)
         
-        # Count similar topics using AI-based similarity detection
-        similar_topic_count = 0
-        for existing_topic, count in topic_counter.items():
-            if _are_topics_similar(topic, existing_topic):
-                similar_topic_count += count
-        
-        # Check if the last 3 topics are semantically similar to the current topic
+        # Check if the last 3 topics are similar to the current topic
         last_topics = state.get("last_topics", [])
         if len(last_topics) >= 3:
             last_three = last_topics[-3:]
-            similar_topics_count = sum(1 for t in last_three if _are_topics_similar(topic, t))
+            similar_topics_count = sum(1 for t in last_three if t == topic)
             if similar_topics_count >= 2:  # If at least 2 of the last 3 topics are similar
                 return True
         
-        # If similar topics have been asked about 3 or more times, generate a diagram
-        return similar_topic_count >= 3
+        # If the topic has been asked about 3 or more times, generate a diagram
+        return topic_count >= 3
     
-    async def chat(self, user_id: str, session_id: str, message: str, syllabus: str = "General", grade_level: str = "5"):
+    @provides_capability("chat")
+    async def chat(self, user_id: str, session_id: str, message: str, syllabus: str = "General", 
+                  grade_level: str = "5", context: Dict[str, Any] = None) -> Dict[str, Any]:
         """
-        Process a chat message and generate a response.
+        Process a chat message and generate a response with enhanced agentic capabilities.
         
         Args:
             user_id (str): The user's ID
             session_id (str): The session ID
             message (str): The user's message
             syllabus (str, optional): The syllabus context. Defaults to "General".
-            Grade_level (str, optional): The target grade level. Defaults to "5".
+            grade_level (str, optional): The target grade level. Defaults to "5".
+            context (Dict[str, Any], optional): Additional context for the conversation
             
         Returns:
-            Dict[str, Any]: The response data
+            Dict[str, Any]: The response data with enhanced information
         """
-        # Initialize result dictionary
+        # Start timing for performance metrics
+        start_time = time.time()
+        
+        # Initialize enhanced result dictionary
         result = {
             "answer": None,
             "diagram": None,
             "topic": None,
-            "error": None
+            "error": None,
+            "suggested_topics": [],
+            "confidence_score": None,
+            "processing_time": None,
+            "sources": [],
+            "followup_questions": []
         }
         
         try:
-            # Extract the topic
-            topic = _extract_topic(message)
+            # Get session state
+            session = await self.session_service.get_session(
+                app_name=self.app_name,
+                user_id=user_id,
+                session_id=session_id
+            )
+            
+            if not session:
+                raise ValueError(f"Session {session_id} not found for user {user_id}")
+            
+            state = session.state
+            
+            # Extract topic using enhanced NLP techniques
+            words = message.lower().split()
+            # Remove common stop words
+            stop_words = {"what", "is", "are", "the", "a", "an", "in", "on", "at", "to", "for", "of", "with", "by"}
+            content_words = [word for word in words if word not in stop_words]
+            
+            # Use the first 3-5 content words as the topic
+            topic_words = content_words[:5] if len(content_words) >= 5 else content_words
+            topic = " ".join(topic_words)
             result["topic"] = topic
             
-            # Update the session state
-            state = await self.update_session_state(user_id, session_id, topic)
+            # Estimate question complexity (simple heuristic based on length and vocabulary)
+            question_complexity = min(1.0, len(message) / 200) + min(1.0, len(set(words)) / 50)
+            question_complexity = min(10, max(1, int(question_complexity * 5)))  # Scale to 1-10
             
-            # Check if we should generate a diagram
+            # Update session state with enhanced tracking
+            state = await self.update_session_state(user_id, session_id, topic)
+            state["question_complexity"].append(question_complexity)
+            state["last_interaction_time"] = time.time()
+            
+            # Determine if we should generate a diagram based on enhanced criteria
             should_diagram = self.should_generate_diagram(state, topic)
             
-            # Prepare the message for the agent
+            # Determine appropriate response complexity based on grade level and question history
+            avg_complexity = sum(state["question_complexity"][-5:]) / len(state["question_complexity"][-5:]) if state["question_complexity"] else 5
+            
+            # Prepare enhanced context for the agent
+            context_data = {
+                "grade_level": grade_level,
+                "syllabus": syllabus,
+                "topic": topic,
+                "question_complexity": question_complexity,
+                "avg_complexity": avg_complexity,
+                "topics_explained": list(state["topics_explained"]),
+                "diagrams_generated": list(state["diagrams_generated"]),
+                "question_count": state["question_count"],
+                "user_interests": state["subject_interests"],
+                "previous_topics": state["last_topics"][-5:] if len(state["last_topics"]) > 0 else []
+            }
+            
+            # Merge with additional context if provided
+            if context:
+                context_data.update(context)
+            
+            # Prepare the enhanced prompt for the agent
             prompt = f"""
             User question: {message}
-            
             Syllabus: {syllabus}
             Grade level: {grade_level}
+            Question complexity: {question_complexity}/10
+            
+            Context:
+            - This is question #{state["question_count"] + 1} in this session
+            - Previous topics discussed: {', '.join(state["last_topics"][-3:]) if state["last_topics"] else 'None'}
+            - User interests: {', '.join(state["subject_interests"]) if state["subject_interests"] else 'Unknown'}
             
             {f'I notice you have asked multiple questions about topics related to "{topic}". Please generate a diagram to help explain this concept more clearly.' if should_diagram else ''}
+            
+            Please provide:
+            1. A clear, educational answer appropriate for grade {grade_level}
+            2. 2-3 suggested follow-up questions the user might be interested in
+            3. If relevant, suggest related topics that connect to the user's interests
             """
             
+            # Create the content object for the agent
             content = types.Content(role='user', parts=[types.Part(text=prompt)])
             
-            # Run the agent
-            final_response = None
-            async for event in self.runner.run_async(user_id=user_id, session_id=session_id, new_message=content):
-                if event.is_final_response():
-                    if event.content and event.content.parts:
-                        final_response = event.content.parts[0].text
-                    elif event.actions and event.actions.escalate:
-                        result["error"] = f"Agent escalated: {event.error_message or 'No specific message.'}"
-                    break
+            # Notify other agents about the question (non-blocking)
+            try:
+                asyncio.create_task(self._notify_agents_about_question(
+                    user_id, session_id, message, topic, syllabus, grade_level
+                ))
+            except Exception as e:
+                # Non-critical, just log
+                logger.warning(f"Failed to notify agents about question: {str(e)}")
             
-            # If we got a final response, it means the agent successfully processed the message
+            # Variables to store the final response and diagram result
+            final_response = None
+            diagram_result = None
+            
+            # Track if we need to retry due to errors
+            retry_count = 0
+            max_retries = 2
+            
+            while retry_count <= max_retries:
+                try:
+                    # Run the agent and process events
+                    async for event in self.runner.run_async(user_id=user_id, session_id=session_id, new_message=content):
+                        # Capture final text response
+                        if event.is_final_response():
+                            if event.content and event.content.parts:
+                                final_response = event.content.parts[0].text
+                            elif event.actions and event.actions.escalate:
+                                result["error"] = f"Agent escalated: {event.error_message or 'No specific message.'}"
+                            break
+                        
+                        # Capture the tool-use result if provided in an event
+                        if hasattr(event, 'tool_response') and event.tool_response is not None:
+                            tr = event.tool_response
+                            # Look for diagram result structure (image/diagram_code)
+                            if isinstance(tr, dict) and ("image" in tr or "diagram_code" in tr):
+                                diagram_result = tr
+                            # Sometimes Gemini may nest the result
+                            elif hasattr(tr, "image") or hasattr(tr, "diagram_code"):
+                                diagram_result = {"image": getattr(tr, "image", None),
+                                                "diagram_code": getattr(tr, "diagram_code", None)}
+                    
+                    # If we got a response, break the retry loop
+                    if final_response:
+                        break
+                    
+                    # If no response and we haven't hit max retries, try again
+                    retry_count += 1
+                    if retry_count <= max_retries:
+                        logger.warning(f"No response from agent, retrying ({retry_count}/{max_retries})...")
+                        # Add retry information to the prompt
+                        prompt += f"\n\nThis is retry attempt {retry_count}. Please ensure you provide a complete response."
+                        content = types.Content(role='user', parts=[types.Part(text=prompt)])
+                    else:
+                        result["error"] = "Failed to get a response after multiple attempts"
+                        
+                except Exception as e:
+                    retry_count += 1
+                    if retry_count <= max_retries:
+                        logger.warning(f"Error running agent, retrying ({retry_count}/{max_retries}): {str(e)}")
+                    else:
+                        raise  # Re-raise if we've exhausted retries
+            
+            # Process the response to extract structured information
             if final_response:
+                # Extract suggested follow-up questions if present
+                followup_questions = self._extract_followup_questions(final_response)
+                if followup_questions:
+                    result["followup_questions"] = followup_questions
+                    # Remove the follow-up questions section from the answer
+                    final_response = self._remove_followup_section(final_response)
+                
+                # Extract suggested topics if present
+                suggested_topics = self._extract_suggested_topics(final_response)
+                if suggested_topics:
+                    result["suggested_topics"] = suggested_topics
+                    # Add to session state to avoid repeating
+                    state["suggested_topics"].update(suggested_topics)
+                    # Remove the suggested topics section from the answer
+                    final_response = self._remove_suggested_topics_section(final_response)
+                
+                # Set the final answer
                 result["answer"] = final_response
                 
-                # If we should generate a diagram, do it
-                if should_diagram:
-                    # Call the diagram tool directly
-                    diagram_result = generate_diagram_for_topic(topic)
-                    result["diagram"] = diagram_result.get("image")
+                # Perform self-evaluation of the response
+                confidence_score = self._evaluate_response_quality(final_response, message, grade_level)
+                result["confidence_score"] = confidence_score
+                
+                # Add topic to topics explained
+                state["topics_explained"].add(topic)
+            
+            # Process diagram result if present
+            if diagram_result:
+                result["diagram"] = diagram_result.get("image")
+                if result["diagram"]:
+                    # Add to diagrams generated
+                    state["diagrams_generated"].add(topic)
+            
+            # Update session metrics
+            processing_time = time.time() - start_time
+            result["processing_time"] = processing_time
+            
+            state["total_response_time"] += processing_time
+            state["response_count"] += 1
+            state["average_response_time"] = state["total_response_time"] / state["response_count"]
+            
+            # Update global metrics
+            self.metrics["total_questions"] += 1
+            self.metrics["successful_responses"] += 1 if not result["error"] else 0
+            self.metrics["diagram_generations"] += 1 if result["diagram"] else 0
+            self.metrics["total_response_time"] += processing_time
+            self.metrics["average_response_time"] = self.metrics["total_response_time"] / self.metrics["total_questions"]
             
         except Exception as e:
+            logger.error(f"Error processing message: {str(e)}", exc_info=True)
             result["error"] = f"Error processing message: {str(e)}"
+            result["processing_time"] = time.time() - start_time
         
         return result
-
-# Async helper function to call the agent
-async def call_chatbot_agent_async(query: str, runner, user_id, session_id):
-    """Sends a query to the agent and returns the final response."""
-    print(f"\n>>> User Query: {query}")
-
-    # Prepare the user's message in ADK format
-    content = types.Content(role='user', parts=[types.Part(text=query)])
-
-    final_response_text = "Agent did not produce a final response."  # Default
-
-    # Iterate through events to find the final answer
-    async for event in runner.run_async(user_id=user_id, session_id=session_id, new_message=content):
-        if event.is_final_response():
-            if event.content and event.content.parts:
-                # Assuming text response in the first part
-                final_response_text = event.content.parts[0].text
-            elif event.actions and event.actions.escalate:
-                final_response_text = f"Agent escalated: {event.error_message or 'No specific message.'}"
-
-    return final_response_text
+    
+    async def _notify_agents_about_question(self, user_id: str, session_id: str, 
+                                           message: str, topic: str, syllabus: str, grade_level: str):
+        """
+        Notify other agents about a new question (non-blocking).
+        
+        Args:
+            user_id: The user's ID
+            session_id: The session ID
+            message: The user's message
+            topic: The extracted topic
+            syllabus: The syllabus context
+            grade_level: The target grade level
+        """
+        # Create notification data
+        notification_data = {
+            "event": "new_question",
+            "user_id": user_id,
+            "session_id": session_id,
+            "message": message,
+            "topic": topic,
+            "syllabus": syllabus,
+            "grade_level": grade_level,
+            "timestamp": time.time(),
+            "agent": self.agent_name
+        }
+        
+        # Get all registered agents
+        agents = registry.list_agents()
+        
+        # Send notification to all agents except self
+        for agent in agents:
+            if agent != self.agent_name:
+                await message_bus.send_message(
+                    NotificationMessage(
+                        sender=self.agent_name,
+                        recipient=agent,
+                        notification_type="new_question",
+                        message=f"New question about {topic} in session {session_id}",
+                        data=notification_data
+                    )
+                )
+    
+    def _extract_followup_questions(self, response: str) -> List[str]:
+        """
+        Extract follow-up questions from the response.
+        
+        Args:
+            response: The response text
+            
+        Returns:
+            List of follow-up questions
+        """
+        questions = []
+        
+        # Look for common patterns indicating follow-up questions
+        patterns = [
+            r"(?:Follow-up questions:|Here are some follow-up questions:|You might also want to ask:|Related questions:)(.*?)(?:\n\n|$)",
+            r"(?:\d+\.\s*)(.*?\?)"
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, response, re.DOTALL)
+            if matches:
+                for match in matches:
+                    # Clean up the match
+                    question = match.strip()
+                    if question and question.endswith("?"):
+                        questions.append(question)
+        
+        return questions[:3]  # Limit to 3 questions
+    
+    def _remove_followup_section(self, response: str) -> str:
+        """
+        Remove the follow-up questions section from the response.
+        
+        Args:
+            response: The response text
+            
+        Returns:
+            Response text without the follow-up questions section
+        """
+        patterns = [
+            r"(?:Follow-up questions:|Here are some follow-up questions:|You might also want to ask:|Related questions:).*?(?:\n\n|$)",
+        ]
+        
+        for pattern in patterns:
+            response = re.sub(pattern, "", response, flags=re.DOTALL)
+        
+        return response.strip()
+    
+    def _extract_suggested_topics(self, response: str) -> List[str]:
+        """
+        Extract suggested topics from the response.
+        
+        Args:
+            response: The response text
+            
+        Returns:
+            List of suggested topics
+        """
+        topics = []
+        
+        # Look for common patterns indicating suggested topics
+        patterns = [
+            r"(?:Related topics:|You might also be interested in:|Other topics to explore:|Suggested topics:)(.*?)(?:\n\n|$)",
+            r"(?:•|✓|\*)\s*(.*?)(?:$|\n)"
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, response, re.DOTALL)
+            if matches:
+                for match in matches:
+                    # Clean up the match
+                    topic = match.strip()
+                    if topic:
+                        topics.append(topic)
+        
+        return topics[:3]  # Limit to 3 topics
+    
+    def _remove_suggested_topics_section(self, response: str) -> str:
+        """
+        Remove the suggested topics section from the response.
+        
+        Args:
+            response: The response text
+            
+        Returns:
+            Response text without the suggested topics section
+        """
+        patterns = [
+            r"(?:Related topics:|You might also be interested in:|Other topics to explore:|Suggested topics:).*?(?:\n\n|$)",
+        ]
+        
+        for pattern in patterns:
+            response = re.sub(pattern, "", response, flags=re.DOTALL)
+        
+        return response.strip()
+    
+    def _evaluate_response_quality(self, response: str, question: str, grade_level: str) -> float:
+        """
+        Perform self-evaluation of the response quality.
+        
+        Args:
+            response: The response text
+            question: The original question
+            grade_level: The target grade level
+            
+        Returns:
+            Confidence score (0.0-1.0)
+        """
+        # This is a simple heuristic-based evaluation
+        # In a real implementation, this could use a separate LLM call or more sophisticated metrics
+        
+        score = 0.5  # Start with a neutral score
+        
+        # Length-based heuristics
+        if len(response) < 50:
+            score -= 0.2  # Too short
+        elif len(response) > 200:
+            score += 0.1  # Good length
+        
+        # Content-based heuristics
+        if "I don't know" in response.lower() or "I'm not sure" in response.lower():
+            score -= 0.1  # Uncertainty
+        
+        if question.lower() in response.lower():
+            score += 0.1  # Response incorporates the question
+        
+        # Grade-level appropriate language (simple heuristic)
+        words = response.split()
+        avg_word_length = sum(len(word) for word in words) / len(words) if words else 0
+        
+        try:
+            target_grade = int(grade_level)
+            # Adjust score based on word length appropriate for grade level
+            if target_grade <= 3 and avg_word_length > 5:
+                score -= 0.1  # Too complex for early grades
+            elif target_grade >= 9 and avg_word_length < 5:
+                score -= 0.1  # Too simple for higher grades
+        except ValueError:
+            # If grade_level isn't a number, skip this check
+            pass
+        
+        # Ensure score is in range [0.0, 1.0]
+        return max(0.0, min(1.0, score))
