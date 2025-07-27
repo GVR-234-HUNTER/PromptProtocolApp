@@ -458,7 +458,7 @@ class ChatbotAgentADK:
             state = session.state
             
             # Extract topic using advanced NLP techniques
-            topic = self._extract_topic_advanced(message, context_data if 'context_data' in locals() else {})
+            topic = self._extract_topic_advanced(message, {})
             result["topic"] = topic
             
             # Estimate question complexity using advanced analysis
