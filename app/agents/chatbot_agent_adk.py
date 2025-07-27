@@ -196,7 +196,19 @@ class ChatbotAgentADK:
             "successful_responses": 0,
             "diagram_generations": 0,
             "average_response_time": 0,
-            "total_response_time": 0
+            "total_response_time": 0,
+            "error_count": 0,
+            "circuit_breaker_trips": 0,
+            "fallback_activations": 0
+        }
+        
+        # Circuit breaker for external dependencies
+        self.circuit_breaker = {
+            "failure_count": 0,
+            "last_failure_time": 0,
+            "state": "closed",  # closed, open, half_open
+            "failure_threshold": 5,
+            "recovery_timeout": 60  # seconds
         }
         
         # Register with the agent registry
@@ -445,25 +457,41 @@ class ChatbotAgentADK:
             
             state = session.state
             
-            # Extract topic using enhanced NLP techniques
-            words = message.lower().split()
-            # Remove common stop words
-            stop_words = {"what", "is", "are", "the", "a", "an", "in", "on", "at", "to", "for", "of", "with", "by"}
-            content_words = [word for word in words if word not in stop_words]
-            
-            # Use the first 3-5 content words as the topic
-            topic_words = content_words[:5] if len(content_words) >= 5 else content_words
-            topic = " ".join(topic_words)
+            # Extract topic using advanced NLP techniques
+            topic = self._extract_topic_advanced(message, context_data if 'context_data' in locals() else {})
             result["topic"] = topic
             
-            # Estimate question complexity (simple heuristic based on length and vocabulary)
-            question_complexity = min(1.0, len(message) / 200) + min(1.0, len(set(words)) / 50)
-            question_complexity = min(10, max(1, int(question_complexity * 5)))  # Scale to 1-10
+            # Estimate question complexity using advanced analysis
+            question_complexity = self._analyze_question_complexity(message, grade_level)
+            
+            # Extract key entities and concepts
+            entities = self._extract_entities(message)
+            concepts = self._extract_concepts(message, syllabus)
             
             # Update session state with enhanced tracking
             state = await self.update_session_state(user_id, session_id, topic)
             state["question_complexity"].append(question_complexity)
             state["last_interaction_time"] = time.time()
+            
+            # Store extracted information for autonomous decision-making
+            current_context = {
+                "message": message,
+                "topic": topic,
+                "question_complexity": question_complexity,
+                "entities": entities,
+                "concepts": concepts,
+                "grade_level": grade_level,
+                "syllabus": syllabus
+            }
+            
+            # Make autonomous decisions about how to handle this interaction
+            autonomous_decisions = self._make_autonomous_decisions(state, current_context)
+            
+            # Adapt response style based on user patterns
+            style_adaptation = self._adapt_response_style(state, grade_level, question_complexity)
+            
+            # Generate proactive suggestions
+            proactive_suggestions = self._generate_proactive_suggestions(state, topic, grade_level, syllabus)
             
             # Determine if we should generate a diagram based on enhanced criteria
             should_diagram = self.should_generate_diagram(state, topic)
@@ -471,7 +499,7 @@ class ChatbotAgentADK:
             # Determine appropriate response complexity based on grade level and question history
             avg_complexity = sum(state["question_complexity"][-5:]) / len(state["question_complexity"][-5:]) if state["question_complexity"] else 5
             
-            # Prepare enhanced context for the agent
+            # Prepare enhanced context for the agent with autonomous decisions
             context_data = {
                 "grade_level": grade_level,
                 "syllabus": syllabus,
@@ -482,7 +510,11 @@ class ChatbotAgentADK:
                 "diagrams_generated": list(state["diagrams_generated"]),
                 "question_count": state["question_count"],
                 "user_interests": state["subject_interests"],
-                "previous_topics": state["last_topics"][-5:] if len(state["last_topics"]) > 0 else []
+                "previous_topics": state["last_topics"][-5:] if len(state["last_topics"]) > 0 else [],
+                "autonomous_decisions": autonomous_decisions,
+                "style_adaptation": style_adaptation,
+                "entities": entities,
+                "concepts": concepts
             }
             
             # Merge with additional context if provided
@@ -600,6 +632,22 @@ class ChatbotAgentADK:
                 
                 # Add topic to topics explained
                 state["topics_explained"].add(topic)
+                
+                # Add proactive suggestions to the result
+                if proactive_suggestions:
+                    result["suggested_topics"].extend(proactive_suggestions)
+                
+                # Learn from this interaction
+                interaction_data = {
+                    "topic": topic,
+                    "question_complexity": question_complexity,
+                    "entities": entities,
+                    "concepts": concepts,
+                    "confidence_score": confidence_score,
+                    "autonomous_decisions": autonomous_decisions,
+                    "style_adaptation": style_adaptation
+                }
+                self._learn_from_interaction(state, interaction_data)
             
             # Process diagram result if present
             if diagram_result:
@@ -815,3 +863,666 @@ class ChatbotAgentADK:
         
         # Ensure score is in range [0.0, 1.0]
         return max(0.0, min(1.0, score))
+    
+    def _extract_topic_advanced(self, message: str, context: Dict[str, Any] = None) -> str:
+        """
+        Extract topic using advanced NLP techniques.
+        
+        Args:
+            message: The user's message
+            context: Additional context for topic extraction
+            
+        Returns:
+            Extracted topic string
+        """
+        try:
+            # Clean and tokenize the message
+            words = re.findall(r'\b[a-zA-Z]+\b', message.lower())
+            
+            # Enhanced stop words list
+            stop_words = {
+                "what", "is", "are", "the", "a", "an", "in", "on", "at", "to", "for", "of", "with", "by",
+                "how", "why", "when", "where", "who", "which", "can", "could", "would", "should",
+                "do", "does", "did", "will", "have", "has", "had", "be", "been", "being",
+                "this", "that", "these", "those", "i", "you", "he", "she", "it", "we", "they",
+                "me", "him", "her", "us", "them", "my", "your", "his", "her", "its", "our", "their"
+            }
+            
+            # Remove stop words
+            content_words = [word for word in words if word not in stop_words and len(word) > 2]
+            
+            # Subject-specific keyword weighting
+            subject_keywords = {
+                "math": ["equation", "formula", "calculate", "solve", "number", "algebra", "geometry", "fraction"],
+                "science": ["experiment", "hypothesis", "theory", "molecule", "atom", "energy", "force", "biology"],
+                "history": ["war", "battle", "empire", "revolution", "century", "ancient", "medieval", "modern"],
+                "english": ["grammar", "sentence", "paragraph", "essay", "literature", "poetry", "novel", "story"],
+                "geography": ["country", "continent", "ocean", "mountain", "river", "climate", "population", "capital"]
+            }
+            
+            # Weight words based on subject relevance
+            weighted_words = {}
+            for word in content_words:
+                weight = 1.0
+                for subject, keywords in subject_keywords.items():
+                    if word in keywords:
+                        weight += 0.5
+                weighted_words[word] = weight
+            
+            # Sort by weight and frequency
+            word_counts = {}
+            for word in content_words:
+                word_counts[word] = word_counts.get(word, 0) + weighted_words.get(word, 1.0)
+            
+            # Get top weighted words
+            sorted_words = sorted(word_counts.items(), key=lambda x: x[1], reverse=True)
+            top_words = [word for word, weight in sorted_words[:5]]
+            
+            # Create topic from top words
+            if top_words:
+                topic = " ".join(top_words[:3])  # Use top 3 words
+            else:
+                # Fallback to simple extraction
+                topic = " ".join(content_words[:3]) if content_words else "general question"
+            
+            return topic.strip()
+            
+        except Exception as e:
+            logger.error(f"Error in advanced topic extraction: {str(e)}")
+            # Fallback to simple extraction
+            words = message.lower().split()
+            stop_words = {"what", "is", "are", "the", "a", "an", "in", "on", "at", "to", "for", "of", "with", "by"}
+            content_words = [word for word in words if word not in stop_words]
+            return " ".join(content_words[:3]) if content_words else "general question"
+    
+    def _analyze_question_complexity(self, message: str, grade_level: str) -> int:
+        """
+        Analyze question complexity using multiple factors.
+        
+        Args:
+            message: The user's message
+            grade_level: Target grade level
+            
+        Returns:
+            Complexity score (1-10)
+        """
+        try:
+            complexity_score = 5  # Start with medium complexity
+            
+            # Length-based complexity
+            word_count = len(message.split())
+            if word_count > 20:
+                complexity_score += 1
+            elif word_count < 5:
+                complexity_score -= 1
+            
+            # Vocabulary complexity
+            words = re.findall(r'\b[a-zA-Z]+\b', message.lower())
+            avg_word_length = sum(len(word) for word in words) / len(words) if words else 0
+            
+            if avg_word_length > 6:
+                complexity_score += 1
+            elif avg_word_length < 4:
+                complexity_score -= 1
+            
+            # Question type complexity
+            question_indicators = {
+                "what": 1, "who": 1, "when": 1, "where": 1,  # Simple factual
+                "how": 3, "why": 4,  # More complex analytical
+                "compare": 4, "analyze": 5, "evaluate": 5, "synthesize": 5  # High-level thinking
+            }
+            
+            for indicator, score in question_indicators.items():
+                if indicator in message.lower():
+                    complexity_score = max(complexity_score, score)
+            
+            # Subject-specific complexity indicators
+            complex_terms = [
+                "relationship", "correlation", "causation", "implication", "consequence",
+                "hypothesis", "theory", "principle", "concept", "methodology"
+            ]
+            
+            for term in complex_terms:
+                if term in message.lower():
+                    complexity_score += 1
+                    break
+            
+            # Adjust for grade level expectations
+            try:
+                target_grade = int(grade_level)
+                if target_grade <= 3:
+                    complexity_score = min(complexity_score, 6)  # Cap complexity for young students
+                elif target_grade >= 9:
+                    complexity_score = max(complexity_score, 4)  # Minimum complexity for older students
+            except ValueError:
+                pass
+            
+            return max(1, min(10, complexity_score))
+            
+        except Exception as e:
+            logger.error(f"Error analyzing question complexity: {str(e)}")
+            return 5  # Default to medium complexity
+    
+    def _extract_entities(self, message: str) -> List[str]:
+        """
+        Extract named entities and key concepts from the message.
+        
+        Args:
+            message: The user's message
+            
+        Returns:
+            List of extracted entities
+        """
+        try:
+            entities = []
+            
+            # Simple pattern-based entity extraction
+            # Numbers and dates
+            numbers = re.findall(r'\b\d+(?:\.\d+)?\b', message)
+            entities.extend([f"number:{num}" for num in numbers])
+            
+            # Capitalized words (potential proper nouns)
+            proper_nouns = re.findall(r'\b[A-Z][a-z]+\b', message)
+            entities.extend([f"proper_noun:{noun}" for noun in proper_nouns])
+            
+            # Common academic subjects
+            subjects = ["math", "science", "history", "english", "geography", "biology", "chemistry", "physics"]
+            for subject in subjects:
+                if subject in message.lower():
+                    entities.append(f"subject:{subject}")
+            
+            # Time-related entities
+            time_words = ["today", "yesterday", "tomorrow", "week", "month", "year", "century"]
+            for time_word in time_words:
+                if time_word in message.lower():
+                    entities.append(f"time:{time_word}")
+            
+            return list(set(entities))  # Remove duplicates
+            
+        except Exception as e:
+            logger.error(f"Error extracting entities: {str(e)}")
+            return []
+    
+    def _extract_concepts(self, message: str, syllabus: str) -> List[str]:
+        """
+        Extract key concepts based on the syllabus context.
+        
+        Args:
+            message: The user's message
+            syllabus: The syllabus context
+            
+        Returns:
+            List of extracted concepts
+        """
+        try:
+            concepts = []
+            message_lower = message.lower()
+            
+            # Syllabus-specific concept extraction
+            concept_maps = {
+                "math": {
+                    "arithmetic": ["add", "subtract", "multiply", "divide", "sum", "difference", "product", "quotient"],
+                    "algebra": ["equation", "variable", "solve", "x", "y", "unknown", "expression"],
+                    "geometry": ["triangle", "circle", "square", "rectangle", "angle", "area", "perimeter", "volume"],
+                    "fractions": ["fraction", "numerator", "denominator", "half", "quarter", "third"]
+                },
+                "science": {
+                    "biology": ["cell", "organism", "ecosystem", "evolution", "genetics", "dna", "species"],
+                    "chemistry": ["atom", "molecule", "element", "compound", "reaction", "periodic", "bond"],
+                    "physics": ["force", "energy", "motion", "gravity", "electricity", "magnetism", "wave"]
+                },
+                "history": {
+                    "ancient": ["egypt", "rome", "greece", "civilization", "empire", "pharaoh", "emperor"],
+                    "medieval": ["knight", "castle", "feudal", "crusade", "plague", "renaissance"],
+                    "modern": ["revolution", "industrial", "world war", "democracy", "independence"]
+                }
+            }
+            
+            syllabus_lower = syllabus.lower()
+            if syllabus_lower in concept_maps:
+                for concept_category, keywords in concept_maps[syllabus_lower].items():
+                    for keyword in keywords:
+                        if keyword in message_lower:
+                            concepts.append(f"{concept_category}:{keyword}")
+            
+            # General academic concepts
+            general_concepts = {
+                "analysis": ["analyze", "examine", "study", "investigate", "research"],
+                "comparison": ["compare", "contrast", "similar", "different", "alike", "unlike"],
+                "causation": ["cause", "effect", "result", "consequence", "because", "therefore"],
+                "evaluation": ["evaluate", "assess", "judge", "critique", "opinion", "value"]
+            }
+            
+            for concept_type, keywords in general_concepts.items():
+                for keyword in keywords:
+                    if keyword in message_lower:
+                        concepts.append(f"thinking:{concept_type}")
+                        break
+            
+            return list(set(concepts))  # Remove duplicates
+            
+        except Exception as e:
+            logger.error(f"Error extracting concepts: {str(e)}")
+            return []
+    
+    def _generate_proactive_suggestions(self, session_state: Dict[str, Any], current_topic: str, 
+                                      grade_level: str, syllabus: str) -> List[str]:
+        """
+        Generate proactive suggestions based on conversation context and user patterns.
+        
+        Args:
+            session_state: Current session state
+            current_topic: Current topic being discussed
+            grade_level: Target grade level
+            syllabus: Subject context
+            
+        Returns:
+            List of proactive suggestions
+        """
+        try:
+            suggestions = []
+            
+            # Analyze user's learning patterns
+            topics_explained = session_state.get("topics_explained", set())
+            question_complexity = session_state.get("question_complexity", [])
+            subject_interests = session_state.get("subject_interests", set())
+            
+            # Suggest related topics based on current discussion
+            topic_relationships = {
+                "fractions": ["decimals", "percentages", "ratios"],
+                "algebra": ["equations", "graphing", "functions"],
+                "geometry": ["area", "perimeter", "angles", "shapes"],
+                "photosynthesis": ["cellular respiration", "plant biology", "ecosystems"],
+                "world war": ["causes of war", "historical timeline", "geography"],
+                "democracy": ["government types", "voting systems", "citizenship"]
+            }
+            
+            current_topic_lower = current_topic.lower()
+            for base_topic, related in topic_relationships.items():
+                if base_topic in current_topic_lower:
+                    for related_topic in related:
+                        if related_topic not in [t.lower() for t in topics_explained]:
+                            suggestions.append(f"Would you like to learn about {related_topic}?")
+            
+            # Suggest complexity progression
+            if question_complexity:
+                avg_complexity = sum(question_complexity[-5:]) / len(question_complexity[-5:])
+                if avg_complexity < 4 and len(question_complexity) > 3:
+                    suggestions.append("Ready for a more challenging question on this topic?")
+                elif avg_complexity > 7:
+                    suggestions.append("Would you like to review the basics of this topic?")
+            
+            # Suggest cross-subject connections
+            cross_subject_connections = {
+                "math": ["How is math used in science experiments?", "Math in art and design"],
+                "science": ["The math behind scientific discoveries", "Science in everyday life"],
+                "history": ["How geography influenced historical events", "Science and technology in history"]
+            }
+            
+            syllabus_lower = syllabus.lower()
+            if syllabus_lower in cross_subject_connections:
+                suggestions.extend(cross_subject_connections[syllabus_lower])
+            
+            # Suggest study techniques based on grade level
+            try:
+                grade_num = int(grade_level)
+                if grade_num <= 5:
+                    suggestions.append("Would you like some fun ways to remember this?")
+                elif grade_num >= 8:
+                    suggestions.append("Want to explore real-world applications of this concept?")
+            except ValueError:
+                pass
+            
+            # Limit suggestions and add variety
+            return suggestions[:3] if suggestions else []
+            
+        except Exception as e:
+            logger.error(f"Error generating proactive suggestions: {str(e)}")
+            return []
+    
+    def _adapt_response_style(self, session_state: Dict[str, Any], grade_level: str, 
+                            question_complexity: int) -> Dict[str, Any]:
+        """
+        Adapt response style based on user interaction patterns.
+        
+        Args:
+            session_state: Current session state
+            grade_level: Target grade level
+            question_complexity: Complexity of current question
+            
+        Returns:
+            Style adaptation parameters
+        """
+        try:
+            adaptation = {
+                "formality_level": "medium",
+                "explanation_depth": "standard",
+                "use_examples": True,
+                "use_analogies": False,
+                "encourage_exploration": True
+            }
+            
+            # Analyze user's response patterns
+            question_count = session_state.get("question_count", 0)
+            complexity_history = session_state.get("question_complexity", [])
+            
+            # Adapt based on grade level
+            try:
+                grade_num = int(grade_level)
+                if grade_num <= 3:
+                    adaptation.update({
+                        "formality_level": "casual",
+                        "explanation_depth": "simple",
+                        "use_examples": True,
+                        "use_analogies": True
+                    })
+                elif grade_num >= 9:
+                    adaptation.update({
+                        "formality_level": "formal",
+                        "explanation_depth": "detailed",
+                        "encourage_exploration": True
+                    })
+            except ValueError:
+                pass
+            
+            # Adapt based on question complexity trends
+            if complexity_history:
+                avg_complexity = sum(complexity_history[-3:]) / len(complexity_history[-3:])
+                if avg_complexity > 7:
+                    adaptation["explanation_depth"] = "detailed"
+                    adaptation["use_examples"] = True
+                elif avg_complexity < 3:
+                    adaptation["explanation_depth"] = "simple"
+                    adaptation["use_analogies"] = True
+            
+            # Adapt based on session length
+            if question_count > 10:
+                adaptation["formality_level"] = "casual"  # More relaxed for longer sessions
+            elif question_count < 3:
+                adaptation["encourage_exploration"] = True  # Encourage new users
+            
+            return adaptation
+            
+        except Exception as e:
+            logger.error(f"Error adapting response style: {str(e)}")
+            return {
+                "formality_level": "medium",
+                "explanation_depth": "standard",
+                "use_examples": True,
+                "use_analogies": False,
+                "encourage_exploration": True
+            }
+    
+    def _make_autonomous_decisions(self, session_state: Dict[str, Any], current_context: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Make autonomous decisions about how to handle the current interaction.
+        
+        Args:
+            session_state: Current session state
+            current_context: Context of current interaction
+            
+        Returns:
+            Dictionary of autonomous decisions
+        """
+        try:
+            decisions = {
+                "should_generate_diagram": False,
+                "should_suggest_worksheet": False,
+                "should_change_difficulty": False,
+                "should_introduce_new_topic": False,
+                "response_strategy": "direct_answer"
+            }
+            
+            topic = current_context.get("topic", "")
+            question_complexity = current_context.get("question_complexity", 5)
+            entities = current_context.get("entities", [])
+            concepts = current_context.get("concepts", [])
+            
+            # Decision: Generate diagram
+            visual_indicators = ["diagram", "chart", "graph", "picture", "visual", "show me"]
+            complex_topics = ["process", "cycle", "system", "structure", "relationship"]
+            
+            if (any(indicator in current_context.get("message", "").lower() for indicator in visual_indicators) or
+                any(topic_word in topic.lower() for topic_word in complex_topics) or
+                question_complexity >= 6):
+                decisions["should_generate_diagram"] = True
+            
+            # Decision: Suggest worksheet
+            topics_explained = session_state.get("topics_explained", set())
+            if len(topics_explained) >= 3 and topic in topics_explained:
+                decisions["should_suggest_worksheet"] = True
+            
+            # Decision: Change difficulty
+            complexity_history = session_state.get("question_complexity", [])
+            if len(complexity_history) >= 3:
+                recent_avg = sum(complexity_history[-3:]) / 3
+                overall_avg = sum(complexity_history) / len(complexity_history)
+                
+                if recent_avg > overall_avg + 2:
+                    decisions["should_change_difficulty"] = "increase"
+                elif recent_avg < overall_avg - 2:
+                    decisions["should_change_difficulty"] = "decrease"
+            
+            # Decision: Response strategy
+            if question_complexity <= 3:
+                decisions["response_strategy"] = "simple_explanation"
+            elif question_complexity >= 7:
+                decisions["response_strategy"] = "detailed_analysis"
+            elif any("why" in concept for concept in concepts):
+                decisions["response_strategy"] = "causal_explanation"
+            elif any("compare" in concept for concept in concepts):
+                decisions["response_strategy"] = "comparative_analysis"
+            
+            # Decision: Introduce new topic
+            question_count = session_state.get("question_count", 0)
+            if question_count > 0 and question_count % 5 == 0:  # Every 5 questions
+                decisions["should_introduce_new_topic"] = True
+            
+            return decisions
+            
+        except Exception as e:
+            logger.error(f"Error making autonomous decisions: {str(e)}")
+            return {
+                "should_generate_diagram": False,
+                "should_suggest_worksheet": False,
+                "should_change_difficulty": False,
+                "should_introduce_new_topic": False,
+                "response_strategy": "direct_answer"
+            }
+    
+    def _learn_from_interaction(self, session_state: Dict[str, Any], interaction_data: Dict[str, Any]):
+        """
+        Learn from the current interaction to improve future responses.
+        
+        Args:
+            session_state: Current session state to update
+            interaction_data: Data from the current interaction
+        """
+        try:
+            # Update learning patterns
+            topic = interaction_data.get("topic", "")
+            complexity = interaction_data.get("question_complexity", 5)
+            entities = interaction_data.get("entities", [])
+            concepts = interaction_data.get("concepts", [])
+            
+            # Learn user's subject interests
+            subject_interests = session_state.get("subject_interests", set())
+            for entity in entities:
+                if entity.startswith("subject:"):
+                    subject_interests.add(entity.split(":")[1])
+            session_state["subject_interests"] = subject_interests
+            
+            # Learn complexity preferences
+            complexity_preferences = session_state.get("complexity_preferences", {})
+            if topic:
+                if topic not in complexity_preferences:
+                    complexity_preferences[topic] = []
+                complexity_preferences[topic].append(complexity)
+                # Keep only recent preferences (last 5)
+                complexity_preferences[topic] = complexity_preferences[topic][-5:]
+            session_state["complexity_preferences"] = complexity_preferences
+            
+            # Learn concept relationships
+            concept_relationships = session_state.get("concept_relationships", {})
+            if len(concepts) > 1:
+                for i, concept1 in enumerate(concepts):
+                    for concept2 in concepts[i+1:]:
+                        if concept1 not in concept_relationships:
+                            concept_relationships[concept1] = set()
+                        concept_relationships[concept1].add(concept2)
+            session_state["concept_relationships"] = concept_relationships
+            
+            # Update success patterns
+            success_patterns = session_state.get("success_patterns", {})
+            response_quality = interaction_data.get("confidence_score", 0.5)
+            
+            pattern_key = f"complexity_{complexity}_topic_{len(topic.split())}"
+            if pattern_key not in success_patterns:
+                success_patterns[pattern_key] = []
+            success_patterns[pattern_key].append(response_quality)
+            # Keep only recent patterns
+            success_patterns[pattern_key] = success_patterns[pattern_key][-10:]
+            session_state["success_patterns"] = success_patterns
+            
+        except Exception as e:
+            logger.error(f"Error learning from interaction: {str(e)}")
+    
+    def _check_circuit_breaker(self) -> bool:
+        """
+        Check if the circuit breaker allows the operation to proceed.
+        
+        Returns:
+            True if operation can proceed, False if circuit is open
+        """
+        current_time = time.time()
+        
+        if self.circuit_breaker["state"] == "open":
+            # Check if recovery timeout has passed
+            if current_time - self.circuit_breaker["last_failure_time"] > self.circuit_breaker["recovery_timeout"]:
+                self.circuit_breaker["state"] = "half_open"
+                logger.info("Circuit breaker moved to half-open state")
+                return True
+            return False
+        
+        return True
+    
+    def _record_success(self):
+        """Record a successful operation for circuit breaker."""
+        if self.circuit_breaker["state"] == "half_open":
+            self.circuit_breaker["state"] = "closed"
+            self.circuit_breaker["failure_count"] = 0
+            logger.info("Circuit breaker closed after successful operation")
+    
+    def _record_failure(self):
+        """Record a failed operation for circuit breaker."""
+        self.circuit_breaker["failure_count"] += 1
+        self.circuit_breaker["last_failure_time"] = time.time()
+        self.metrics["error_count"] += 1
+        
+        if self.circuit_breaker["failure_count"] >= self.circuit_breaker["failure_threshold"]:
+            self.circuit_breaker["state"] = "open"
+            self.metrics["circuit_breaker_trips"] += 1
+            logger.warning(f"Circuit breaker opened after {self.circuit_breaker['failure_count']} failures")
+    
+    def _graceful_degradation_response(self, message: str, grade_level: str, syllabus: str) -> Dict[str, Any]:
+        """
+        Provide a graceful degradation response when primary systems fail.
+        
+        Args:
+            message: User's message
+            grade_level: Target grade level
+            syllabus: Subject context
+            
+        Returns:
+            Fallback response
+        """
+        self.metrics["fallback_activations"] += 1
+        
+        # Simple pattern-based responses for common question types
+        message_lower = message.lower()
+        
+        fallback_responses = {
+            "what": f"That's a great question about {syllabus}! Let me provide a basic explanation suitable for grade {grade_level}.",
+            "how": f"Here's a simple way to think about this {syllabus} concept for grade {grade_level} level.",
+            "why": f"That's an important question in {syllabus}. Let me explain the reasoning behind this concept.",
+            "when": f"This is a good historical or temporal question about {syllabus}.",
+            "where": f"This relates to location or context in {syllabus} studies."
+        }
+        
+        # Find appropriate fallback response
+        fallback_answer = "I understand you're asking about this topic. While I'm experiencing some technical difficulties, I want to help you learn. This appears to be a question that would benefit from a detailed explanation with examples."
+        
+        for question_word, response_template in fallback_responses.items():
+            if question_word in message_lower:
+                fallback_answer = response_template
+                break
+        
+        return {
+            "answer": fallback_answer + " I recommend asking your teacher or checking your textbook for more detailed information on this topic.",
+            "diagram": None,
+            "topic": "general",
+            "error": "System operating in degraded mode - limited functionality available",
+            "suggested_topics": ["Ask your teacher for more details", "Check your textbook", "Try rephrasing your question"],
+            "confidence_score": 0.3,
+            "processing_time": 0.1,
+            "sources": [],
+            "followup_questions": ["Would you like to try asking this question differently?"]
+        }
+    
+    def _enhanced_error_reporting(self, error: Exception, context: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Provide enhanced error reporting with diagnostic information.
+        
+        Args:
+            error: The exception that occurred
+            context: Context information about the error
+            
+        Returns:
+            Enhanced error report
+        """
+        error_report = {
+            "error_type": type(error).__name__,
+            "error_message": str(error),
+            "timestamp": time.time(),
+            "context": context,
+            "recovery_suggestions": [],
+            "user_message": "I encountered an issue while processing your request."
+        }
+        
+        # Provide specific recovery suggestions based on error type
+        if "timeout" in str(error).lower():
+            error_report["recovery_suggestions"] = [
+                "Try asking a simpler question",
+                "Check your internet connection",
+                "Wait a moment and try again"
+            ]
+            error_report["user_message"] = "The request took too long to process. Please try a simpler question or try again in a moment."
+        
+        elif "connection" in str(error).lower():
+            error_report["recovery_suggestions"] = [
+                "Check internet connectivity",
+                "Try again in a few minutes",
+                "Contact support if the issue persists"
+            ]
+            error_report["user_message"] = "I'm having trouble connecting to my knowledge base. Please try again in a few minutes."
+        
+        elif "memory" in str(error).lower() or "resource" in str(error).lower():
+            error_report["recovery_suggestions"] = [
+                "Try asking a shorter question",
+                "Break complex questions into smaller parts",
+                "Clear your session and start fresh"
+            ]
+            error_report["user_message"] = "Your question is quite complex. Try breaking it into smaller parts or asking a simpler question."
+        
+        else:
+            error_report["recovery_suggestions"] = [
+                "Try rephrasing your question",
+                "Ask about a different topic",
+                "Contact support if the issue continues"
+            ]
+            error_report["user_message"] = "I encountered an unexpected issue. Please try rephrasing your question or ask about a different topic."
+        
+        # Log detailed error information
+        logger.error(f"Enhanced error report: {error_report}", exc_info=True)
+        
+        return error_report

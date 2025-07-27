@@ -224,10 +224,16 @@ class DiagramAgentADK:
             "get_supported_diagram_types",
             "get_diagram_suggestions"
         ])
-        
-        # Listen for notifications from other agents
-        asyncio.create_task(self._setup_notification_handlers())
-        
+
+        # DO NOT start async tasks here! Instead, use async_init() later in the event loop
+        # asyncio.create_task(self._setup_notification_handlers())
+
+    async def async_init(self):
+        """
+        Run async initialization routines after construction, in a running event loop.
+        """
+        await self._setup_notification_handlers()
+
     async def _setup_notification_handlers(self):
         """
         Set up handlers for notifications from other agents.
