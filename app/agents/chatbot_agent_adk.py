@@ -385,9 +385,81 @@ class ChatbotAgentADK:
         
         return session.state
     
-    def should_generate_diagram(self, state: Dict[str, Any], topic: str) -> bool:
+    async def should_generate_diagram(self, state: Dict[str, Any], topic: str) -> bool:
         """
         Determine if a diagram should be generated based on the session state.
+        Uses LLM to make an intelligent decision with fallback to heuristics.
+        
+        Args:
+            state (Dict[str, Any]): The session state
+            topic (str): The current topic
+            
+        Returns:
+            bool: True if a diagram should be generated, False otherwise
+        """
+        try:
+            # Extract relevant context from state for LLM decision
+            topic_counter = state.get("topic_counter", {})
+            topic_count = topic_counter.get(topic, 0)
+            last_topics = state.get("last_topics", [])
+            recent_topics = last_topics[-5:] if len(last_topics) >= 5 else last_topics
+            
+            # Get additional context if available
+            topics_explained = list(state.get("topics_explained", set()))
+            diagrams_generated = list(state.get("diagrams_generated", set()))
+            question_count = state.get("question_count", 0)
+            
+            # Create a prompt for the LLM to decide if a diagram should be generated
+            prompt = f"""
+            As an educational assistant, decide if a diagram would be helpful for the student based on this context:
+            
+            Topic: {topic}
+            Number of times this topic has been discussed: {topic_count}
+            Recent topics discussed: {', '.join(recent_topics)}
+            Total questions asked in this session: {question_count}
+            Topics already explained: {', '.join(topics_explained[:5])}
+            Topics with diagrams already generated: {', '.join(diagrams_generated)}
+            
+            Consider these factors:
+            1. Is the topic visual in nature and would benefit from a diagram?
+            2. Has the student shown repeated interest in this topic?
+            3. Would a diagram help clarify concepts that might be difficult to understand through text alone?
+            4. Is this topic related to science, math, geography, or processes that are typically explained with visuals?
+            
+            Respond with only "Yes" if a diagram should be generated, or "No" if not.
+            """
+            
+            # Create the content object for the agent
+            content = types.Content(role='user', parts=[types.Part(text=prompt)])
+            
+            # Use a separate runner instance to avoid interfering with ongoing conversations
+            async for event in self.runner.run_async(
+                user_id="system",
+                session_id="diagram_decision",
+                new_message=content
+            ):
+                if event.is_final_response() and event.content and event.content.parts:
+                    response = event.content.parts[0].text.strip().lower()
+                    # Check if the response is a clear yes
+                    if "yes" in response:
+                        logger.info(f"LLM decided to generate diagram for topic: {topic}")
+                        return True
+                    elif "no" in response:
+                        logger.info(f"LLM decided not to generate diagram for topic: {topic}")
+                        return False
+            
+            # If we didn't get a clear response, fall back to heuristics
+            logger.warning(f"Falling back to heuristics for diagram decision on topic: {topic}")
+            return self._should_generate_diagram_heuristic(state, topic)
+            
+        except Exception as e:
+            # Log the error and fall back to heuristics
+            logger.error(f"Error in LLM diagram decision: {str(e)}", exc_info=True)
+            return self._should_generate_diagram_heuristic(state, topic)
+    
+    def _should_generate_diagram_heuristic(self, state: Dict[str, Any], topic: str) -> bool:
+        """
+        Fallback heuristic method to determine if a diagram should be generated.
         
         Args:
             state (Dict[str, Any]): The session state
@@ -470,6 +542,10 @@ class ChatbotAgentADK:
             
             # Update session state with enhanced tracking
             state = await self.update_session_state(user_id, session_id, topic)
+            
+            # Ensure question_complexity exists before appending to it
+            if "question_complexity" not in state:
+                state["question_complexity"] = []
             state["question_complexity"].append(question_complexity)
             state["last_interaction_time"] = time.time()
             
@@ -494,9 +570,11 @@ class ChatbotAgentADK:
             proactive_suggestions = self._generate_proactive_suggestions(state, topic, grade_level, syllabus)
             
             # Determine if we should generate a diagram based on enhanced criteria
-            should_diagram = self.should_generate_diagram(state, topic)
+            should_diagram = await self.should_generate_diagram(state, topic)
             
             # Determine appropriate response complexity based on grade level and question history
+            if "question_complexity" not in state:
+                state["question_complexity"] = []
             avg_complexity = sum(state["question_complexity"][-5:]) / len(state["question_complexity"][-5:]) if state["question_complexity"] else 5
             
             # Prepare enhanced context for the agent with autonomous decisions
@@ -506,11 +584,11 @@ class ChatbotAgentADK:
                 "topic": topic,
                 "question_complexity": question_complexity,
                 "avg_complexity": avg_complexity,
-                "topics_explained": list(state["topics_explained"]),
-                "diagrams_generated": list(state["diagrams_generated"]),
-                "question_count": state["question_count"],
-                "user_interests": state["subject_interests"],
-                "previous_topics": state["last_topics"][-5:] if len(state["last_topics"]) > 0 else [],
+                "topics_explained": list(state.get("topics_explained", set())),
+                "diagrams_generated": list(state.get("diagrams_generated", set())),
+                "question_count": state.get("question_count", 0),
+                "user_interests": state.get("subject_interests", []),
+                "previous_topics": state.get("last_topics", [])[-5:] if len(state.get("last_topics", [])) > 0 else [],
                 "autonomous_decisions": autonomous_decisions,
                 "style_adaptation": style_adaptation,
                 "entities": entities,
@@ -529,9 +607,9 @@ class ChatbotAgentADK:
             Question complexity: {question_complexity}/10
             
             Context:
-            - This is question #{state["question_count"] + 1} in this session
-            - Previous topics discussed: {', '.join(state["last_topics"][-3:]) if state["last_topics"] else 'None'}
-            - User interests: {', '.join(state["subject_interests"]) if state["subject_interests"] else 'Unknown'}
+            - This is question #{state.get("question_count", 0) + 1} in this session
+            - Previous topics discussed: {', '.join(state.get("last_topics", [])[-3:]) if state.get("last_topics", []) else 'None'}
+            - User interests: {', '.join(state.get("subject_interests", [])) if state.get("subject_interests", []) else 'Unknown'}
             
             {f'I notice you have asked multiple questions about topics related to "{topic}". Please generate a diagram to help explain this concept more clearly.' if should_diagram else ''}
             
@@ -619,6 +697,8 @@ class ChatbotAgentADK:
                 if suggested_topics:
                     result["suggested_topics"] = suggested_topics
                     # Add to session state to avoid repeating
+                    if "suggested_topics" not in state:
+                        state["suggested_topics"] = set()
                     state["suggested_topics"].update(suggested_topics)
                     # Remove the suggested topics section from the answer
                     final_response = self._remove_suggested_topics_section(final_response)
@@ -627,10 +707,12 @@ class ChatbotAgentADK:
                 result["answer"] = final_response
                 
                 # Perform self-evaluation of the response
-                confidence_score = self._evaluate_response_quality(final_response, message, grade_level)
+                confidence_score = await self._evaluate_response_quality(final_response, message, grade_level)
                 result["confidence_score"] = confidence_score
                 
                 # Add topic to topics explained
+                if "topics_explained" not in state:
+                    state["topics_explained"] = set()
                 state["topics_explained"].add(topic)
                 
                 # Add proactive suggestions to the result
@@ -654,12 +736,22 @@ class ChatbotAgentADK:
                 result["diagram"] = diagram_result.get("image")
                 if result["diagram"]:
                     # Add to diagrams generated
+                    if "diagrams_generated" not in state:
+                        state["diagrams_generated"] = set()
                     state["diagrams_generated"].add(topic)
             
             # Update session metrics
             processing_time = time.time() - start_time
             result["processing_time"] = processing_time
             
+            # Ensure session metrics keys exist before updating them
+            if "total_response_time" not in state:
+                state["total_response_time"] = 0.0
+            if "response_count" not in state:
+                state["response_count"] = 0
+            if "average_response_time" not in state:
+                state["average_response_time"] = 0.0
+                
             state["total_response_time"] += processing_time
             state["response_count"] += 1
             state["average_response_time"] = state["total_response_time"] / state["response_count"]
@@ -816,9 +908,9 @@ class ChatbotAgentADK:
         
         return response.strip()
     
-    def _evaluate_response_quality(self, response: str, question: str, grade_level: str) -> float:
+    async def _evaluate_response_quality(self, response: str, question: str, grade_level: str) -> float:
         """
-        Perform self-evaluation of the response quality.
+        Perform self-evaluation of the response quality using LLM.
         
         Args:
             response: The response text
@@ -828,9 +920,81 @@ class ChatbotAgentADK:
         Returns:
             Confidence score (0.0-1.0)
         """
-        # This is a simple heuristic-based evaluation
-        # In a real implementation, this could use a separate LLM call or more sophisticated metrics
+        try:
+            # Create a prompt for the LLM to evaluate the response quality
+            prompt = f"""
+            As an educational expert, evaluate the quality of this response to a student question.
+            
+            Student's grade level: {grade_level}
+            Student's question: {question}
+            
+            Response to evaluate:
+            ---
+            {response}
+            ---
+            
+            Evaluate the response on these criteria:
+            1. Accuracy and correctness of information
+            2. Clarity and understandability for a grade {grade_level} student
+            3. Completeness in addressing the question
+            4. Engagement and educational value
+            5. Age-appropriateness of language and concepts
+            
+            Based on your evaluation, provide a single confidence score between 0.0 and 1.0, where:
+            - 0.0 means completely inadequate response
+            - 0.5 means average, acceptable response
+            - 1.0 means excellent, perfect response
+            
+            Respond with only the numeric score (e.g., "0.7").
+            """
+            
+            # Create the content object for the agent
+            content = types.Content(role='user', parts=[types.Part(text=prompt)])
+            
+            # Use a separate runner instance to avoid interfering with ongoing conversations
+            async for event in self.runner.run_async(
+                user_id="system",
+                session_id="quality_evaluation",
+                new_message=content
+            ):
+                if event.is_final_response() and event.content and event.content.parts:
+                    llm_response = event.content.parts[0].text.strip()
+                    
+                    # Try to extract a numeric score from the response
+                    try:
+                        # Look for a number in the response
+                        import re
+                        score_match = re.search(r'(\d+\.\d+|\d+)', llm_response)
+                        if score_match:
+                            score = float(score_match.group(1))
+                            # Ensure score is in range [0.0, 1.0]
+                            score = max(0.0, min(1.0, score))
+                            logger.info(f"LLM evaluated response quality: {score}")
+                            return score
+                    except Exception as e:
+                        logger.warning(f"Error parsing LLM quality score: {str(e)}")
+            
+            # If we didn't get a valid score, fall back to heuristics
+            logger.warning("Falling back to heuristics for response quality evaluation")
+            return self._evaluate_response_quality_heuristic(response, question, grade_level)
+            
+        except Exception as e:
+            # Log the error and fall back to heuristics
+            logger.error(f"Error in LLM quality evaluation: {str(e)}", exc_info=True)
+            return self._evaluate_response_quality_heuristic(response, question, grade_level)
+    
+    def _evaluate_response_quality_heuristic(self, response: str, question: str, grade_level: str) -> float:
+        """
+        Fallback heuristic method to evaluate response quality.
         
+        Args:
+            response: The response text
+            question: The original question
+            grade_level: The target grade level
+            
+        Returns:
+            Confidence score (0.0-1.0)
+        """
         score = 0.5  # Start with a neutral score
         
         # Length-based heuristics
