@@ -3,14 +3,14 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 from dotenv import load_dotenv
 
-# Import routers
-from app.api import diagram, worksheet
+# Import ADK-based routers
+from app.api import diagram_adk, worksheet_adk, chatbot_adk
 
 # Load environment variables
 load_dotenv()
 
 # Create FastAPI app
-app = FastAPI(title="Sahayak Teaching Platform", version="1.0.0")
+app = FastAPI(title="Sahayak Teaching Platform (ADK Version)", version="2.0.0")
 
 # Add CORS middleware
 app.add_middleware(
@@ -21,18 +21,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include routers
-app.include_router(diagram.router, prefix="/api/diagram", tags=["Diagram Agent"])
-app.include_router(worksheet.router, prefix="/api/worksheet", tags=["Worksheet Agent"])
+# Include ADK-based routers
+app.include_router(diagram_adk.router, prefix="/api/diagram", tags=["Diagram Agent"])
+app.include_router(worksheet_adk.router, prefix="/api/worksheet", tags=["Worksheet Agent"])
+app.include_router(chatbot_adk.router, prefix="/api/chatbot", tags=["Chatbot Agent"])
 
 @app.get("/")
 async def root():
-    return {"message": "Welcome to the Sahayak Teaching Platform", "version": "1.0.0"}
+    return {"message": "Welcome to the Sahayak Teaching Platform (ADK Version)", "version": "2.0.0"}
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy", "version": "1.0.0"}
+    return {"status": "healthy", "version": "2.0.0", "implementation": "ADK"}
 
 if __name__ == "__main__":
     import uvicorn
